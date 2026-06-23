@@ -1,0 +1,9 @@
+[project]
+name = "taskmaster"
+version = "0.1.0"
+
+[project.scripts]
+taskmaster = "main:main"
+
+[tool.uv]
+package = true
