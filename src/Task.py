@@ -9,7 +9,7 @@ class Task(BaseModel):
     workingdir: Path
     autostart: bool
     autorestart: Literal['unexpected', 'never', 'always']
-    exitcodes: list[NonNegativeInt]
+    exitcodes: list[NonNegativeInt] | NonNegativeInt
     startretries: NonNegativeInt
     starttime: NonNegativeInt
     stopsignal: str
