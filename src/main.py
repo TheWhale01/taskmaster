@@ -2,6 +2,7 @@ import yaml
 import signal
 import argparse
 from Task import Task
+from typing import Any
 from functools import partial
 
 def load_config(filename: str) -> dict[str, Task]:
@@ -13,6 +14,37 @@ def load_config(filename: str) -> dict[str, Task]:
             tasks.update(new_task)
     return tasks
 
+def spawn_task(tasks: dict[str, Task], task: dict[str, Task]):
+    print("Spawning new task")
+    tasks.update(task)
+
+def despawn_task(tasks: dict[str, Task], name: str):
+    print("De-_spawning old task")
+    tasks.pop(name)
+
+def change_numprocs(tasks: dict[str, Task], name: str):
+    pass
+
+def apply_update(tasks: dict[str, Task], name: str, key: str, value: Any):
+    print("Applying update")
+    setattr(tasks[name], key, value)
+    non_rebooting_fields: list[str] = [
+        'autostart',
+        'autorestart',
+        'exitcodes',
+        'startretries',
+        'starttime',
+        'stopsignal',
+        'stoptime'
+    ]
+    if key in non_rebooting_fields:
+        return
+    if key == 'numprocs':
+        change_numprocs(tasks, name)
+    else:
+        despawn_task(tasks, name)
+        spawn_task(tasks, {name: tasks[name]})
+
 def handle_sighup(old_tasks: dict[str, Task], config: str, signum, frame):
     new_tasks: dict[str, Task] = load_config(config)
     if new_tasks == old_tasks:
@@ -21,11 +53,9 @@ def handle_sighup(old_tasks: dict[str, Task], config: str, signum, frame):
     removed = old_tasks.keys() - new_tasks.keys()
     updated = new_tasks.keys() & old_tasks.keys()
     for name in added:
-        print(f"Added {name} task")
-        # Will need to actually run the new task
+        spawn_task(old_tasks, {name: new_tasks[name]})
     for name in removed:
-        print(f"Removed {name} task")
-        # Will need to actually kill the old task
+        despawn_task(old_tasks, name)
     for name in updated:
         if old_tasks[name] == new_tasks[name]:
             continue
@@ -33,7 +63,7 @@ def handle_sighup(old_tasks: dict[str, Task], config: str, signum, frame):
         new_field = new_tasks[name].model_dump()
         for field in old_field:
             if old_field[field] != new_field[field]:
-                print(f"Key: {field} changed in task: {name}")
+                apply_update(old_tasks, name, field, new_field[field])
 
 def main():
     parser = argparse.ArgumentParser()
