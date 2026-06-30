@@ -1,37 +1,21 @@
-import yaml
-import signal
-import argparse
-from Task import Task
+import json
+import socket
 from typing import Any
+from Task import Task
 
-class Taskmaster:
-    filename: str
-    tasks: dict[str, Task] = {}
-
-    def __init__(self):
-        parser = argparse.ArgumentParser()
-        parser.add_argument("config")
-        args = parser.parse_args()
-        self.filename = args.config
-
-    def load_config(self) -> dict[str, Task]:
-        tasks: dict[str, Task] = {}
-        with open(self.filename, 'r') as file:
-            conf = yaml.safe_load(file)
-            for (key, value) in conf['programs'].items():
-                tasks[key] = Task(**value)
-        print(f"DEBUG: {tasks}")
-        return tasks
+class Server:
+    def __init__(self, host: str = '127.0.0.1', port: int = 8080):
+        self.host = host
+        self.port = port
+        self.tasks: dict[str, Task] = {}
 
     def spawn_task(self, task: dict[str, Task]):
-        print("Spawning new task")
-        self.tasks.update(task)
+        pass
 
     def despawn_task(self, name: str):
-        print("De-_spawning old task")
-        self.tasks.pop(name)
+        pass
 
-    def change_numprocs(self, name: str):
+    def change_numprocs(self, name):
         pass
 
     def apply_update(self, name: str, key: str, value: Any):
@@ -54,8 +38,7 @@ class Taskmaster:
             self.despawn_task(name)
             self.spawn_task({name: self.tasks[name]})
 
-    def handler(self, signum, frame):
-        new_tasks: dict[str, Task] = self.load_config()
+    def process_new_config(self, new_tasks: dict[str, Task]):
         if new_tasks == self.tasks:
             return
         added = new_tasks.keys() - self.tasks.keys()
@@ -75,7 +58,22 @@ class Taskmaster:
                     self.apply_update(name, field, new_field[field])
 
     def launch(self):
-        self.load_config()
-        signal.signal(signal.SIGHUP, self.handler)
-        while True:
-            pass
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((self.host, self.port))
+            sock.listen()
+            while True:
+                conn, addr = sock.accept()
+                with conn:
+                    print(f"Connection receved from {addr}.")
+                    payload: bytes = b''
+                    while True:
+                        chunk = conn.recv(2048)
+                        if not chunk:
+                            break
+                        payload += chunk
+                    new_tasks: dict[str, Task] = {}
+                    for key, value in json.loads(payload.decode()).items():
+                        new_tasks[key] = Task(**value)
+                    print(f"DEBUG: {new_tasks}")
+                    self.process_new_config(new_tasks)
