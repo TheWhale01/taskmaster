@@ -3,7 +3,6 @@ import yaml
 import socket
 import argparse
 from Task import Task
-from typing import Optional
 
 class Client:
     def __init__(self, host: str = '127.0.0.1', port: int = 8080):

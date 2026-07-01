@@ -7,8 +7,10 @@ This project is about job control. It's made in Python.
 
 ### Nix:
 
-```nix
-nix run .
+```bash
+nix develop .
+python3 src/server.py
+python3 src/client.py
 ```
 
 ### Other distributions

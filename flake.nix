@@ -23,10 +23,6 @@
   in
   {
     packages.${system}.default = venv;
-    apps.${system}.default = {
-      type = "app";
-      program = "${venv}/bin/taskmaster";
-    };
     devShells.${system}.default = pkgs.mkShell {
       packages = [
         pkgs.uv

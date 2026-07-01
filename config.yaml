@@ -1,8 +1,9 @@
 programs:
   nginx:
-    cmd: "/usr/local/bin/nginx -c /etc/nginx/test.conf"
+    # cmd: "/usr/local/bin/nginx -c /etc/nginx/test.conf"
+    cmd: "touch /tmp/TEST.txt && echo $STARTED_BY"
     numprocs: 1
-    umask: 022
+    umask: 077
     workingdir: /tmp
     autostart: true
     autorestart: unexpected

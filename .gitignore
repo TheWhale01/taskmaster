@@ -3,3 +3,4 @@
 taskmaster.egg*/
 __pycache__/
 __init__.py
+*.log
