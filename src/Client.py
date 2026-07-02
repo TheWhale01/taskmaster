@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import time
 import shlex
@@ -12,12 +13,6 @@ class Client:
         self.port = port
         self.socket: socket.socket
 
-    def __del__(self):
-        try:
-            self.socket.close()
-        except Exception:
-            pass
-
     @staticmethod
     def get_socket(host: str, port: int) -> socket.socket:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -25,17 +20,34 @@ class Client:
             sock.connect((host, port))
         except Exception as e:
             print(f"Failed to connect to server: {e}")
-            print("Retrying connection in 3 secondes...")
+            print("Retrying connection in 3 seconds...")
             time.sleep(3)
             return None
         return sock
 
+    def close_client(self, message: str = None):
+        if message:
+            print(message)
+        try:
+            self.socket.close()
+        except Exception:
+            pass
+        print("The client was successfully disconnected.")
+        sys.exit(0)
+
     def launch(self):
-        self.socket = None
-        while not self.socket:
-            self.socket = self.get_socket(self.host, self.port)
+        self.connect()
         self.set_history()
         self.taskmaster_shell()
+
+    def connect(self):
+        try:
+            self.socket = None
+            while not self.socket:
+              self.socket = self.get_socket(self.host, self.port)
+        except KeyboardInterrupt:
+            self.close_client("\nKeyboard Interrupt while trying to connect.")
+        print(f"The client is now connected to the server. host: {self.host} port: {self.port}")
 
     def set_history(self):
         HISTORY_FILE = os.path.expanduser("~/.taskmaster_history")
@@ -47,8 +59,17 @@ class Client:
 
     def send_cmd(self, cmd: str, args: list[str]):
         payload: bytes = json.dumps({'cmd': cmd, 'args': args}).encode()
-        payload += b'\n'
-        self.socket.sendall(payload)
+        try:
+            self.socket.sendall(payload + b'\n')
+        except (BrokenPipeError, ConnectionResetError) as e:
+            print(f"Connection to server lost: {e}")
+            self.connect()
+        response = self.socket.recv(2084)
+        if not response:
+            print("Server is unreachable.")
+            self.connect()
+        else:
+            print(response.decode())
 
     def taskmaster_shell(self):
         RED = "\033[31;20m"
@@ -66,7 +87,7 @@ class Client:
             except EOFError: #ctrl+D
                 COLOR = RED
                 print()
-                break
+                self.close_client()
             except KeyboardInterrupt: #ctrl+C
                 print()
                 continue
@@ -93,6 +114,6 @@ class Client:
             if cmd == "help":
                 print("help")
             elif cmd in ("quit", "exit"):
-                break
+                self.close_client()
             else:
                 self.send_cmd(cmd, args)

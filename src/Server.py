@@ -1,9 +1,12 @@
 import os
+import sys
 import time
 import yaml
 import shlex
+import json
 import string
 import socket
+import signal
 import logging
 import argparse
 from Task import Task
@@ -11,10 +14,14 @@ from typing import Any
 from pathlib import Path
 from Logger import Logger
 from subprocess import Popen
+import subprocess
 from logging.handlers import RotatingFileHandler
 
 class Server:
     def __init__(self, host: str = '127.0.0.1', port: int = 8080):
+        signal.signal(signal.SIGHUP, self.signal_handler)
+        signal.signal(signal.SIGINT, self.signal_handler)
+        signal.signal(signal.SIGTERM, self.signal_handler)
         parser = argparse.ArgumentParser()
         parser.add_argument("config")
         args = parser.parse_args()
@@ -26,6 +33,29 @@ class Server:
         self.tasks: dict[str, Task] = {}
         self.active_processes: dict[str, list[Popen]] = {}
         self.load_config()
+        self.commands = {
+            "status":   self.cmd_status,
+            "start":    self.cmd_start,
+            "stop":     self.cmd_stop,
+            "restart":  self.cmd_restart,
+            "reload":   self.cmd_reload,
+            "shutdown": self.cmd_shutdown,
+        }
+
+    def shutdown_server(self):
+        try:
+            self.socket.close()
+        except Exception:
+            pass
+        self.stop_all_task()
+        print("The server has been successfully shutdown.")
+        sys.exit(0)
+
+    def signal_handler(self, sig, context):
+        if sig == signal.SIGHUP:
+            self.reload_file()
+        elif sig in (signal.SIGINT, signal.SIGTERM):
+            self.shutdown_server()
 
     def setup_logger(self, log_level: int):
         self.logger.setLevel(log_level)
@@ -86,10 +116,35 @@ class Server:
             except Exception as e:
                 self.logger.error(f"Failed to spawn process {name}. {e}. Retrying")
 
+    def stop_all_task(self):
+        for name in self.tasks.keys():
+            self.despawn_task(name, self.tasks[name])
+
+    def get_signal(self, sig_name: str):
+        full_name = "SIG" + sig_name
+        try:
+            return getattr(signal, full_name)
+        except AttributeError:
+            self.logger.error(f"Signal inconnu : '{sig_name}'. SIGTERM used by default.")
+            return signal.SIGTERM
+
     def despawn_task(self, name: str, task: Task, nb_procs: int = -1):
-        time.sleep(task.stoptime)
+        if name not in self.active_processes:
+            return
+        procs = self.active_processes[name]
         if nb_procs == -1:
             nb_procs = task.numprocs
+        for i in range(nb_procs):
+            if not procs:
+                break
+            proc = procs.pop()
+            proc.send_signal(self.get_signal(task.stopsignal))
+            try:
+                proc.wait(timeout=task.stoptime)
+            except (subprocess.TimeoutExpired):
+                proc.kill()
+                proc.wait()
+        self.logger.info(f"Despawned {nb_procs} process(es) of {name}")
 
     def update_numprocs(self, name: str, task: Task):
         nb_processes: int = len(self.active_processes[name])
@@ -156,6 +211,29 @@ class Server:
             new_tasks[key] = Task(**value)
         self.process_new_config(new_tasks)
 
+    def cmd_status(self, args):
+        return("stazeftus")
+
+    def cmd_start(self, args):
+        return("start")
+
+    def cmd_stop(self, args):
+        return("stop")
+
+    def cmd_restart(self, args):
+        return("restart")
+
+    def cmd_reload(self, args):
+        return("reload")
+
+    def cmd_shutdown(self, args):
+        return("shutdown")
+
+    def handle_cmd(self, cmd, arg):
+        function = self.commands[cmd]
+        return function(arg)
+
+
     def launch(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -170,9 +248,12 @@ class Server:
                     while True:
                         chunk = conn.recv(2048)
                         if not chunk:
+                            self.logger.info(f"Connection closed from {addr[0]}")
                             break
                         payload += chunk
                         print(payload)
                         while b'\n' in payload:
                             message, payload = payload.split(b'\n', 1)
-                            print(f"c'est ca que j'ai recu: {message}")
+                            message = json.loads(message.decode())
+                            response = self.handle_cmd(message["cmd"], message["args"])
+                            conn.sendall(response.encode())

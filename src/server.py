@@ -1,4 +1,5 @@
 from Server import Server
+import sys
 import os
 
 def main():
@@ -7,8 +8,9 @@ def main():
         os.setgid(1000)
         os.setuid(1000)
         print("Privilege de-escalation done.")
+    with open("taskmaster.pid", "w") as f:
+        f.write(str(os.getpid())) 
     server = Server()
-
     server.launch()
 
 if __name__ == '__main__':
