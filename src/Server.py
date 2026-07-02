@@ -49,6 +49,7 @@ class Server:
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((self.host, self.port))
+            sock.settimeout(0.1)
         except Exception as e:
             self.logger.error(f"Failed to establish connection to client. {e}")
             return None
@@ -246,24 +247,58 @@ class Server:
         function = self.commands[cmd]
         return function(arg)
 
+    def handle_proc_exit(self, name: str, task: Task, proc: Popen, exit_code: int):
+        is_expected: bool = False
+        if isinstance(task.exitcodes, list):
+            is_expected = exit_code in task.exitcodes
+        else:
+            is_expected = exit_code == task.exitcodes
+        if is_expected:
+            self.logger.info(f"Process {name} gracefully exited with code {exit_code}")
+        else:
+            self.logger.warning(f"Process {name} exited unexpectedly with code {exit_code}")
+        needs_restart: bool = task.autorestart == 'always' or (task.autorestart == 'unexpected' and not is_expected)
+        if needs_restart:
+            self.logger.warning(f"Restarting process {name} based on policy {task.autorestart}")
+            self.spawn_task(name, task)
+
+    def monitor_processes(self):
+        for name, task in self.tasks.items():
+            if name not in self.active_processes.keys():
+                continue
+            alive_processes = []
+            for proc in self.active_processes[name]:
+                exit_code = proc.poll()
+                if exit_code is None:
+                    alive_processes.append(proc)
+                else:
+                    self.handle_proc_exit(name, task, proc, exit_code)
+            self.active_processes[name] = alive_processes
+
     def launch(self):
         if self.socket is None:
             return
         self.socket.listen()
         self.logger.info(f"Server successfully started on {self.host}:{self.port}")
         while True:
-            conn, addr = self.socket.accept()
-            with conn:
-                self.logger.info(f"Connection received from {addr[0]}")
-                payload: bytes = b''
-                while True:
-                    chunk = conn.recv(2048)
-                    if not chunk:
-                        self.logger.info(f"Connection closed from {addr[0]}")
-                        break
-                    payload += chunk
-                    while b'\n' in payload:
-                        message, payload = payload.split(b'\n', 1)
-                        message = json.loads(message.decode())
-                        response = self.handle_cmd(message["cmd"], message["args"])
-                        conn.sendall(response.encode())
+            self.monitor_processes()
+            try:
+                conn, addr = self.socket.accept()
+                with conn:
+                    self.logger.info(f"Connection received from {addr[0]}")
+                    self.socket.settimeout(None)
+                    payload: bytes = b''
+                    while True:
+                        chunk = conn.recv(2048)
+                        if not chunk:
+                            self.logger.info(f"Connection closed from {addr[0]}")
+                            break
+                        payload += chunk
+                        while b'\n' in payload:
+                            message, payload = payload.split(b'\n', 1)
+                            message = json.loads(message.decode())
+                            response = self.handle_cmd(message["cmd"], message["args"])
+                            conn.sendall(response.encode())
+                    self.socket.settimeout(0.1)
+            except socket.timeout:
+                pass
