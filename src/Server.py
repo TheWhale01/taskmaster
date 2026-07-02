@@ -2,19 +2,20 @@ import os
 import sys
 import time
 import yaml
-import shlex
 import json
+import shlex
 import string
 import socket
 import signal
 import logging
 import argparse
+import subprocess
 from Task import Task
 from typing import Any
 from pathlib import Path
 from Logger import Logger
+from typing import Optional
 from subprocess import Popen
-import subprocess
 from logging.handlers import RotatingFileHandler
 
 class Server:
@@ -31,6 +32,7 @@ class Server:
         self.logger = logging.Logger("TaskmasterServer")
         self.setup_logger(logging.DEBUG)
         self.tasks: dict[str, Task] = {}
+        self.socket: Optional[socket.socket] = self.get_socket()
         self.active_processes: dict[str, list[Popen]] = {}
         self.load_config()
         self.commands = {
@@ -42,13 +44,24 @@ class Server:
             "shutdown": self.cmd_shutdown,
         }
 
+    def get_socket(self) -> Optional[socket.socket]:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((self.host, self.port))
+        except Exception as e:
+            self.logger.error(f"Failed to establish connection to client. {e}")
+            return None
+        return sock
+
     def shutdown_server(self):
         try:
-            self.socket.close()
+            if self.socket is not None:
+                self.socket.close()
         except Exception:
             pass
         self.stop_all_task()
-        print("The server has been successfully shutdown.")
+        self.logger.info("The server has been successfully shutdown.")
         sys.exit(0)
 
     def signal_handler(self, sig, context):
@@ -101,11 +114,11 @@ class Server:
 
     def spawn_task(self, name: str, task: Task, nb_procs: int = -1):
         self.active_processes[name] = []
-        time.sleep(task.starttime)
         if nb_procs == -1:
             nb_procs = task.numprocs
         for i in range(task.startretries, 0, -1):
             try:
+                time.sleep(task.starttime)
                 env: dict[str, str] = self.get_env(task)
                 logfiles: tuple = self.get_logfiles(task)
                 for i in range(nb_procs):
@@ -129,7 +142,7 @@ class Server:
             return signal.SIGTERM
 
     def despawn_task(self, name: str, task: Task, nb_procs: int = -1):
-        if name not in self.active_processes:
+        if name not in self.active_processes.keys():
             return
         procs = self.active_processes[name]
         if nb_procs == -1:
@@ -154,7 +167,7 @@ class Server:
             self.despawn_task(name, task, (task.numprocs - nb_processes))
 
     def apply_update(self, name: str, key: str, value: Any):
-        print("Applying update")
+        self.logger.info("Update signal received")
         setattr(self.tasks[name], key, value)
         non_rebooting_fields: list[str] = [
             'autostart',
@@ -200,7 +213,7 @@ class Server:
         with open(self.filename, 'r') as file:
             conf = yaml.safe_load(file)
             for key, value in conf['programs'].items():
-                tasks[key] = Task(**value) 
+                tasks[key] = Task(**value)
         self.process_new_config(tasks)
 
     def reload_file(self):
@@ -233,27 +246,24 @@ class Server:
         function = self.commands[cmd]
         return function(arg)
 
-
     def launch(self):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind((self.host, self.port))
-            sock.listen()
-            self.logger.info(f"Server successfully started on {self.host}:{self.port}")
-            while True:
-                conn, addr = sock.accept()
-                with conn:
-                    self.logger.info(f"Connection received from {addr[0]}")
-                    payload: bytes = b''
-                    while True:
-                        chunk = conn.recv(2048)
-                        if not chunk:
-                            self.logger.info(f"Connection closed from {addr[0]}")
-                            break
-                        payload += chunk
-                        print(payload)
-                        while b'\n' in payload:
-                            message, payload = payload.split(b'\n', 1)
-                            message = json.loads(message.decode())
-                            response = self.handle_cmd(message["cmd"], message["args"])
-                            conn.sendall(response.encode())
+        if self.socket is None:
+            return
+        self.socket.listen()
+        self.logger.info(f"Server successfully started on {self.host}:{self.port}")
+        while True:
+            conn, addr = self.socket.accept()
+            with conn:
+                self.logger.info(f"Connection received from {addr[0]}")
+                payload: bytes = b''
+                while True:
+                    chunk = conn.recv(2048)
+                    if not chunk:
+                        self.logger.info(f"Connection closed from {addr[0]}")
+                        break
+                    payload += chunk
+                    while b'\n' in payload:
+                        message, payload = payload.split(b'\n', 1)
+                        message = json.loads(message.decode())
+                        response = self.handle_cmd(message["cmd"], message["args"])
+                        conn.sendall(response.encode())
