@@ -1,10 +1,11 @@
 import os
 import time
-import json
+import yaml
 import shlex
 import string
 import socket
 import logging
+import argparse
 from Task import Task
 from typing import Any
 from pathlib import Path
@@ -14,12 +15,17 @@ from logging.handlers import RotatingFileHandler
 
 class Server:
     def __init__(self, host: str = '127.0.0.1', port: int = 8080):
+        parser = argparse.ArgumentParser()
+        parser.add_argument("config")
+        args = parser.parse_args()
+        self.filename = args.config
         self.host = host
         self.port = port
         self.logger = logging.Logger("TaskmasterServer")
         self.setup_logger(logging.DEBUG)
         self.tasks: dict[str, Task] = {}
         self.active_processes: dict[str, list[Popen]] = {}
+        self.load_config()
 
     def setup_logger(self, log_level: int):
         self.logger.setLevel(log_level)
@@ -134,6 +140,22 @@ class Server:
                 if old_field[field] != new_field[field]:
                     self.apply_update(name, field, new_field[field])
 
+    def load_config(self):
+        tasks: dict = {}
+        with open(self.filename, 'r') as file:
+            conf = yaml.safe_load(file)
+            for key, value in conf['programs'].items():
+                tasks[key] = Task(**value) 
+        self.process_new_config(tasks)
+
+    def reload_file(self):
+        with open(self.filename, 'r') as file:
+            conf = yaml.safe_load(file)
+        new_tasks: dict[str, Task] = {}
+        for key, value in conf['programs'].items():
+            new_tasks[key] = Task(**value)
+        self.process_new_config(new_tasks)
+
     def launch(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -150,7 +172,7 @@ class Server:
                         if not chunk:
                             break
                         payload += chunk
-                    new_tasks: dict[str, Task] = {}
-                    for key, value in json.loads(payload.decode()).items():
-                        new_tasks[key] = Task(**value)
-                    self.process_new_config(new_tasks)
+                        print(payload)
+                        while b'\n' in payload:
+                            message, payload = payload.split(b'\n', 1)
+                            print(f"c'est ca que j'ai recu: {message}")
