@@ -23,11 +23,22 @@
   in
   {
     packages.${system}.default = venv;
+    apps.${system} = {
+      server = {
+        type = "app";
+        program = "${venv}/bin/server";
+      };
+      client = {
+        type = "app";
+        program = "${venv}/bin/client";
+      };
+    };
     devShells.${system}.default = pkgs.mkShell {
       packages = [
+        venv
         pkgs.uv
         pkgs.nginx
-        venv
+        pkgs.python3
       ];
     };
   };

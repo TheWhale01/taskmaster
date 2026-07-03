@@ -34,6 +34,7 @@ class Server:
         self.tasks: dict[str, Task] = {}
         self.socket: Optional[socket.socket] = self.get_socket()
         self.active_processes: dict[str, list[Popen]] = {}
+        self.pending_spawns: list = []
         self.load_config()
         self.commands = {
             "status":   self.cmd_status,
@@ -101,7 +102,9 @@ class Server:
         env.update(task.env)
         return env
 
-    def create_process(self, task: Task, env: dict[str, str], logfiles: tuple) -> Popen:
+    def create_process(self, name: str, task: Task):
+        env: dict[str, str] = self.get_env(task)
+        logfiles: tuple = self.get_logfiles(task)
         proc = Popen(
             self.get_cmd(task, env),
             cwd=task.workingdir,
@@ -111,20 +114,27 @@ class Server:
             # Setting the umask inside the child process
             preexec_fn=lambda: os.umask(task.umask)
         )
-        return proc
+        self.active_processes[name].append(proc)
 
-    def spawn_task(self, name: str, task: Task, nb_procs: int = -1):
-        self.active_processes[name] = []
+    def schedule_spawn(self, name: str, task: Task):
+        target_time = time.time() + task.starttime
+        self.pending_spawns.append({
+            'launch_time': target_time,
+            'name': name,
+            'task': task
+        })
+        if task.starttime != 0:
+            self.logger.info(f"Scheduled task {name} to start in {task.starttime} seconds.")
+
+    def spawn_task(self, name: str, task: Task, nb_procs: int = -1, flush_processes: bool = True):
+        if flush_processes or name not in self.active_processes:
+            self.active_processes[name] = []
         if nb_procs == -1:
             nb_procs = task.numprocs
-        for i in range(task.startretries, 0, -1):
+        for _ in range(task.startretries, 0, -1):
             try:
-                time.sleep(task.starttime)
-                env: dict[str, str] = self.get_env(task)
-                logfiles: tuple = self.get_logfiles(task)
-                for i in range(nb_procs):
-                    proc: Popen = self.create_process(task, env, logfiles)
-                    self.active_processes[name].append(proc)
+                for _ in range(nb_procs):
+                    self.create_process(name, task)
                 self.logger.info(f"Successfully spawned task {name}")
                 break
             except Exception as e:
@@ -148,7 +158,7 @@ class Server:
         procs = self.active_processes[name]
         if nb_procs == -1:
             nb_procs = task.numprocs
-        for i in range(nb_procs):
+        for _ in range(nb_procs):
             if not procs:
                 break
             proc = procs.pop()
@@ -188,7 +198,7 @@ class Server:
             self.spawn_task(name, self.tasks[name])
 
     def process_new_config(self, new_tasks: dict[str, Task]):
-        self.logger.info("Processing configuration.")
+        self.logger.info("Processing configuration...")
         if new_tasks == self.tasks:
             return
         added = new_tasks.keys() - self.tasks.keys()
@@ -197,7 +207,7 @@ class Server:
         for name in added:
             self.tasks[name] = new_tasks[name]
             if self.tasks[name].autostart:
-                self.spawn_task(name, new_tasks[name])
+                self.schedule_spawn(name, new_tasks[name])
         for name in removed:
             self.despawn_task(name, self.tasks[name])
         for name in updated:
@@ -220,10 +230,10 @@ class Server:
     def reload_file(self):
         with open(self.filename, 'r') as file:
             conf = yaml.safe_load(file)
-        new_tasks: dict[str, Task] = {}
-        for key, value in conf['programs'].items():
-            new_tasks[key] = Task(**value)
-        self.process_new_config(new_tasks)
+            new_tasks: dict[str, Task] = {}
+            for key, value in conf['programs'].items():
+                new_tasks[key] = Task(**value)
+            self.process_new_config(new_tasks)
 
     def cmd_status(self, args):
         return("stazeftus")
@@ -254,19 +264,25 @@ class Server:
         else:
             is_expected = exit_code == task.exitcodes
         if is_expected:
-            self.logger.info(f"Process {name} gracefully exited with code {exit_code}")
+            self.logger.info(f"Process {name} (PID: {proc.pid}) gracefully exited with code {exit_code}")
         else:
-            self.logger.warning(f"Process {name} exited unexpectedly with code {exit_code}")
+            self.logger.warning(f"Process {name} (PID: {proc.pid}) exited unexpectedly with code {exit_code}")
         needs_restart: bool = task.autorestart == 'always' or (task.autorestart == 'unexpected' and not is_expected)
         if needs_restart:
             self.logger.warning(f"Restarting process {name} based on policy {task.autorestart}")
-            self.spawn_task(name, task)
+            self.schedule_spawn(name, task)
 
     def monitor_processes(self):
+        current_time = time.time()
+        for i in range(len(self.pending_spawns) - 1, -1, -1):
+            pending = self.pending_spawns[i]
+            if current_time >= pending['launch_time']:
+                self.spawn_task(pending['name'], pending['task'], 1, flush_processes=False)
+                self.pending_spawns.pop(i)
         for name, task in self.tasks.items():
+            alive_processes: list[Popen] = []
             if name not in self.active_processes.keys():
                 continue
-            alive_processes = []
             for proc in self.active_processes[name]:
                 exit_code = proc.poll()
                 if exit_code is None:
