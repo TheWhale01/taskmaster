@@ -270,7 +270,9 @@ class Server:
         needs_restart: bool = task.autorestart == 'always' or (task.autorestart == 'unexpected' and not is_expected)
         if needs_restart:
             self.logger.warning(f"Restarting process {name} based on policy {task.autorestart}")
-            self.schedule_spawn(name, task)
+            if task.startretries != 0:
+                self.schedule_spawn(name, task)
+                task.startretries -= 1
 
     def monitor_processes(self):
         current_time = time.time()
