@@ -6,15 +6,16 @@ import shlex
 import socket
 import atexit
 import readline
+from typing import Optional
 
 class Client:
     def __init__(self, host: str = '127.0.0.1', port: int = 8080):
         self.host = host
         self.port = port
-        self.socket: socket.socket
+        self.socket: Optional[socket.socket]
 
     @staticmethod
-    def get_socket(host: str, port: int) -> socket.socket:
+    def get_socket(host: str, port: int) -> Optional[socket.socket]:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             sock.connect((host, port))
@@ -25,11 +26,12 @@ class Client:
             return None
         return sock
 
-    def close_client(self, message: str = None):
+    def close_client(self, message: Optional[str] = None):
         if message:
             print(message)
         try:
-            self.socket.close()
+            if self.socket is not None:
+                self.socket.close()
         except Exception:
             pass
         print("The client was successfully disconnected.")
@@ -58,6 +60,9 @@ class Client:
         atexit.register(readline.write_history_file, HISTORY_FILE)
 
     def send_cmd(self, cmd: str, args: list[str]):
+        if self.socket is None:
+            print("Client is not connected to server.")
+            return
         payload: bytes = json.dumps({'cmd': cmd, 'args': args}).encode()
         try:
             self.socket.sendall(payload + b'\n')
@@ -96,7 +101,7 @@ class Client:
             except ValueError as e:
                 COLOR = RED
                 print(f"syntax error: {e}")
-                continue 
+                continue
             if not ligne:
                 continue
             cmd = ligne[0]

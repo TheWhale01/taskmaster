@@ -26,6 +26,7 @@
     devShells.${system}.default = pkgs.mkShell {
       packages = [
         pkgs.uv
+        pkgs.nginx
         venv
       ];
     };
