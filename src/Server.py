@@ -129,7 +129,7 @@ class Server:
             return signal.SIGTERM
 
     def despawn_task(self, name: str, task: Task, nb_procs: int = -1):
-        if name not in self.active_processes:
+        if name not in self.active_processes.keys():
             return
         procs = self.active_processes[name]
         if nb_procs == -1:
