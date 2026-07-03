@@ -70,11 +70,22 @@ class Client:
             print(f"Connection to server lost: {e}")
             self.connect()
         response = self.socket.recv(2084)
-        if not response:
+        if not response: 
             print("Server is unreachable.")
             self.connect()
         else:
             print(response.decode())
+
+    def cmd_help(self):
+        print("Taskmaster client: list of commands:\n")
+        print(f"{'Command':20}{'Argument':25}{'Description'}\n")
+        print(f"{'status':20}{'[task_name]...':25}{'Display the status of all task or those in the argument.'}\n")
+        print(f"{'start':20}{'[task_name]...':25}{'Start all task or those in the argument.'}\n")
+        print(f"{'stop':20}{'[task_name]...':25}{'Stop all task or those in the argument.'}\n")
+        print(f"{'restart':20}{'[task_name]...':25}{'Restart all task or those in the argument.'}\n")
+        print(f"{'reload':20}{'':25}{'Reload the configuration file and apply the changes.'}\n")
+        print(f"{'shutdown':20}{'':25}{'Shutdown the server.'}\n")
+        print(f"{'quit | exit':20}{'':25}{'Disconnect the client.'}\n")
 
     def taskmaster_shell(self):
         RED = "\033[31;20m"
@@ -82,9 +93,9 @@ class Client:
         GREEN = "\033[32;20m"
         RESET = "\033[0m"
         COLOR = GREEN
-        ARGS_MAX = {
-            "help": 0, "quit": 0, "exit": 0, "shutdown": 0,
-            "status": 1, "start": 1, "stop": 1, "restart": 1, "reload": 1
+        COMMANDS = {
+            "help": 1, "quit": 1, "exit": 1, "shutdown": 1,
+            "status": 0, "start": 0, "stop": 0, "restart": 0, "reload": 0
         }
         while True:
             try:
@@ -106,18 +117,18 @@ class Client:
                 continue
             cmd = ligne[0]
             args = ligne[1:]
-            if cmd not in ARGS_MAX:
+            if cmd not in COMMANDS:
                 COLOR = RED
                 print(f"taskmaster: command not found: {cmd}")
                 print("Try 'help' to see the list of commands.")
                 continue
-            if len(args) > ARGS_MAX[cmd]:
+            if args and COMMANDS[cmd]:
                 COLOR = RED
                 print(f"{cmd}: too many arguments: {args}")
                 continue
             COLOR = GREEN
             if cmd == "help":
-                print("help")
+                self.cmd_help()
             elif cmd in ("quit", "exit"):
                 self.close_client()
             else:
