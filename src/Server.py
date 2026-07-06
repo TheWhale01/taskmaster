@@ -1,3 +1,4 @@
+from datetime import datetime
 import os
 import sys
 import time
@@ -132,14 +133,17 @@ class Server:
             self.active_processes[name] = []
         if nb_procs == -1:
             nb_procs = task.numprocs
-        for _ in range(task.startretries, 0, -1):
+        for _ in range(nb_procs):
             try:
-                for _ in range(nb_procs):
-                    self.create_process(name, task)
-                self.logger.info(f"Successfully spawned task {name}")
-                break
+                self.create_process(name, task)
             except Exception as e:
-                self.logger.error(f"Failed to spawn process {name}. {e}. Retrying")
+                if task.retry_count < task.startretries:
+                    self.schedule_spawn(name, task)
+                    self.logger.warning(f"Failed to spawn process {name}. {e}. Retrying")
+                    task.retry_count += 1
+                else:
+                    self.logger.error(f"Failed to spawn process {name}. {e}")
+        self.logger.info(f"Successfully spawned task {name}")
 
     def stop_all_task(self):
         for name in self.tasks.keys():
@@ -233,22 +237,34 @@ class Server:
         return("stazeftus")
 
     def cmd_start(self, args):
+        started = []
+        failed = []
+        success = []
         for taskname in args:
             if taskname not in self.tasks.keys():
+                failed.append(taskname)
                 continue
             if taskname not in self.active_processes.keys():
+                success.append(taskname)
                 self.tasks[taskname].retry_count = 1
                 self.schedule_spawn(taskname, self.tasks[taskname])
-        return ("start")
+            else:
+                started.append(taskname)
+        started = ' '.join(started)
+        failed = ' '.join(failed)
+        success = ' '.join(success)
+        return (f"Started programs: {success}\nFailed to start: {failed}\nAlready running: {started}")
 
     def cmd_stop(self, args):
         for taskname in args:
             if taskname in self.active_processes.keys():
                 self.despawn_task(taskname, self.tasks[taskname])
-        return("stop")
+        return(f"Stopped programs: {' '.join(args)}")
 
     def cmd_restart(self, args):
-        return("restart")
+        self.cmd_stop(args)
+        self.cmd_start(args)
+        return(f"Restarted programs: {' '.join(args)}")
 
     def cmd_reload(self, args):
         self.reload_file()
@@ -273,10 +289,10 @@ class Server:
             self.logger.warning(f"Process {name} (PID: {proc.pid}) exited unexpectedly with code {exit_code}")
         needs_restart: bool = task.autorestart == 'always' or (task.autorestart == 'unexpected' and not is_expected)
         if needs_restart:
-            self.logger.warning(f"Restarting process {name} based on policy {task.autorestart}")
             if task.retry_count < task.startretries:
                 self.schedule_spawn(name, task)
                 task.retry_count += 1
+                self.logger.warning(f"Restarting process {name} based on policy {task.autorestart}")
 
     def monitor_processes(self):
         current_time = time.time()
