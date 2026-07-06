@@ -5,6 +5,7 @@ import yaml
 import json
 import shlex
 import string
+import select
 import socket
 import signal
 import logging
@@ -35,7 +36,7 @@ class Server:
         self.socket: Optional[socket.socket] = self.get_socket()
         self.active_processes: dict[str, list[Popen]] = {}
         self.pending_spawns: list = []
-        self.load_config()
+        self.reload_file()
         self.commands = {
             "status":   self.cmd_status,
             "start":    self.cmd_start,
@@ -50,7 +51,7 @@ class Server:
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((self.host, self.port))
-            sock.settimeout(0.1)
+            sock.setblocking(False)
         except Exception as e:
             self.logger.error(f"Failed to establish connection to client. {e}")
             return None
@@ -168,12 +169,13 @@ class Server:
             except (subprocess.TimeoutExpired):
                 proc.kill()
                 proc.wait()
+        del self.active_processes[name]
         self.logger.info(f"Despawned {nb_procs} process(es) of {name}")
 
     def update_numprocs(self, name: str, task: Task):
         nb_processes: int = len(self.active_processes[name])
         if nb_processes > task.numprocs:
-            self.spawn_task(name, task, (nb_processes - task.numprocs))
+            self.spawn_task(name, task, (nb_processes - task.numprocs), flush_processes=False)
         elif nb_processes < task.numprocs:
             self.despawn_task(name, task, (task.numprocs - nb_processes))
 
@@ -231,9 +233,18 @@ class Server:
         return("stazeftus")
 
     def cmd_start(self, args):
-        return("start")
+        for taskname in args:
+            if taskname not in self.tasks.keys():
+                continue
+            if taskname not in self.active_processes.keys():
+                self.tasks[taskname].retry_count = 1
+                self.schedule_spawn(taskname, self.tasks[taskname])
+        return ("start")
 
     def cmd_stop(self, args):
+        for taskname in args:
+            if taskname in self.active_processes.keys():
+                self.despawn_task(taskname, self.tasks[taskname])
         return("stop")
 
     def cmd_restart(self, args):
@@ -241,7 +252,7 @@ class Server:
 
     def cmd_reload(self, args):
         self.reload_file()
-        return ("Configuration file successfully")
+        return(f"File: {self.filename} reloaded")
 
     def cmd_shutdown(self, args):
         self.shutdown_server()
@@ -263,7 +274,9 @@ class Server:
         needs_restart: bool = task.autorestart == 'always' or (task.autorestart == 'unexpected' and not is_expected)
         if needs_restart:
             self.logger.warning(f"Restarting process {name} based on policy {task.autorestart}")
-            self.schedule_spawn(name, task)
+            if task.retry_count < task.startretries:
+                self.schedule_spawn(name, task)
+                task.retry_count += 1
 
     def monitor_processes(self):
         current_time = time.time()
@@ -283,31 +296,45 @@ class Server:
                 else:
                     self.handle_proc_exit(name, task, proc, exit_code)
             self.active_processes[name] = alive_processes
+            if (len(alive_processes) == 0):
+                del self.active_processes[name]
 
     def launch(self):
         if self.socket is None:
-            return
+            self.logger.error("Socket not initialized. Exiting server.")
+            exit(1)
         self.socket.listen()
         self.logger.info(f"Server successfully started on {self.host}:{self.port}")
+        input_sockets: list[socket.socket] = [self.socket]
+        input_buffers: dict[socket.socket, bytes] = {}
         while True:
             self.monitor_processes()
-            try:
-                conn, addr = self.socket.accept()
-                with conn:
+            readable_sockets, _, _ = select.select(input_sockets, [], [], 0.1)
+            for sock in readable_sockets:
+                if sock is self.socket:
+                    conn, addr = sock.accept()
+                    conn.setblocking(False)
+                    input_sockets.append(conn)
+                    input_buffers[conn] = b''
                     self.logger.info(f"Connection received from {addr[0]}")
-                    self.socket.settimeout(None)
-                    payload: bytes = b''
-                    while True:
-                        chunk = conn.recv(2048)
+                else:
+                    try:
+                        chunk = sock.recv(2048)
                         if not chunk:
-                            self.logger.info(f"Connection closed from {addr[0]}")
-                            break
-                        payload += chunk
-                        while b'\n' in payload:
-                            message, payload = payload.split(b'\n', 1)
+                            self.logger.info("Client disconnected.")
+                            input_sockets.remove(sock)
+                            del input_buffers[sock]
+                            sock.close()
+                            continue
+                        input_buffers[sock] += chunk
+                        while b'\n' in input_buffers[sock]:
+                            message, input_buffers[sock] = input_buffers[sock].split(b'\n', 1)
                             message = json.loads(message.decode())
                             response = self.handle_cmd(message["cmd"], message["args"])
-                            conn.sendall(response.encode())
-                    self.socket.settimeout(0.1)
-            except socket.timeout:
-                pass
+                            sock.sendall(response.encode())
+                    except ConnectionResetError:
+                        input_sockets.remove(sock)
+                        if sock in input_buffers.keys():
+                            del input_buffers[sock]
+                        sock.close()
+                        self.logger.info("Client unexpectedly closed the connection from server.")

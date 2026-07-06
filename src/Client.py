@@ -46,7 +46,7 @@ class Client:
         try:
             self.socket = None
             while not self.socket:
-              self.socket = self.get_socket(self.host, self.port)
+                self.socket = self.get_socket(self.host, self.port)
         except KeyboardInterrupt:
             self.close_client("\nKeyboard Interrupt while trying to connect.")
         print(f"The client is now connected to the server. host: {self.host} port: {self.port}")
