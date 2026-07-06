@@ -219,14 +219,6 @@ class Server:
                 if old_field[field] != new_field[field]:
                     self.apply_update(name, field, new_field[field])
 
-    def load_config(self):
-        tasks: dict = {}
-        with open(self.filename, 'r') as file:
-            conf = yaml.safe_load(file)
-            for key, value in conf['programs'].items():
-                tasks[key] = Task(**value)
-        self.process_new_config(tasks)
-
     def reload_file(self):
         with open(self.filename, 'r') as file:
             conf = yaml.safe_load(file)
@@ -248,10 +240,11 @@ class Server:
         return("restart")
 
     def cmd_reload(self, args):
-        return("reload")
+        self.reload_file()
+        return ("Configuration file successfully")
 
     def cmd_shutdown(self, args):
-        return("shutdown")
+        self.shutdown_server()
 
     def handle_cmd(self, cmd, arg):
         function = self.commands[cmd]
