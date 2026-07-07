@@ -234,7 +234,22 @@ class Server:
             self.process_new_config(new_tasks)
 
     def cmd_status(self, args):
-        return("stazeftus")
+        status: str = ''
+        if len(args) == 0:
+            args = [name for name in self.tasks.keys()]
+        for taskname in args:
+            status += f'{taskname:20}\t'
+            if taskname in self.active_processes.keys():
+                status += "RUNNING"
+            elif any(taskname == name for task in self.pending_spawns for name in task.values()):
+                status += "PENDING"
+            elif taskname not in self.tasks.keys():
+                status += "UNKNOWN TASK"
+            else:
+                status += "STOPPED"
+            status += '\n'
+        status = status[:-1]
+        return status
 
     def cmd_start(self, args):
         started = []
@@ -263,8 +278,8 @@ class Server:
 
     def cmd_restart(self, args):
         self.cmd_stop(args)
-        self.cmd_start(args)
-        return(f"Restarted programs: {' '.join(args)}")
+        msg: str = self.cmd_start(args)
+        return(msg)
 
     def cmd_reload(self, args):
         self.reload_file()
@@ -293,6 +308,8 @@ class Server:
                 self.schedule_spawn(name, task)
                 task.retry_count += 1
                 self.logger.warning(f"Restarting process {name} based on policy {task.autorestart}")
+            elif task.retry_count == task.startretries:
+                self.logger.error(f"Failed to start process {name} due to repeated crashes.")
 
     def monitor_processes(self):
         current_time = time.time()

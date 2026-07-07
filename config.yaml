@@ -1,14 +1,14 @@
 programs:
   nginx:
     # cmd: "/usr/local/bin/nginx -c /etc/nginx/test.conf"
-    cmd: "echo $STARTED_BY"
+    cmd: "sleep infinity"
     numprocs: 1
     umask: 077
     workingdir: /tmp
     autostart: true
     autorestart: unexpected
     exitcodes:
-      # - 0
+      - 0
       - 2
     startretries: 3
     starttime: 5
