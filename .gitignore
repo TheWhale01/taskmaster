@@ -1,5 +1,6 @@
 .direnv/
 .venv/
+.vscode/
 taskmaster.egg*/
 __pycache__/
 __init__.py

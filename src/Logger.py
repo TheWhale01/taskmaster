@@ -6,6 +6,7 @@ class Logger(logging.Formatter):
     YELLOW = "\033[33;20m"
     RED = "\033[31;20m"
     BOLD_RED = "\033[31;1m"
+    BLUE = "\033[36m"
     RESET = "\033[0m"
     FORMAT = f"%(levelname)s - %(asctime)s{RESET} - %(message)s"
     FORMATS = {

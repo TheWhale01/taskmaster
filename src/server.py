@@ -1,6 +1,5 @@
-from Server import Server
-import sys
 import os
+from Server import Server
 
 def main():
     if os.geteuid() == 0:
@@ -9,7 +8,7 @@ def main():
         os.setuid(1000)
         print("Privilege de-escalation done.")
     with open("taskmaster.pid", "w") as f:
-        f.write(str(os.getpid())) 
+        f.write(str(os.getpid()))
     server = Server()
     server.launch()
 

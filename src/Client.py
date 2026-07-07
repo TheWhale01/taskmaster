@@ -6,6 +6,7 @@ import shlex
 import socket
 import atexit
 import readline
+from Logger import Logger
 from typing import Optional
 
 class Client:
@@ -29,11 +30,8 @@ class Client:
     def close_client(self, message: Optional[str] = None):
         if message:
             print(message)
-        try:
-            if self.socket is not None:
-                self.socket.close()
-        except Exception:
-            pass
+        if self.socket is not None:
+            self.socket.close()
         print("The client was successfully disconnected.")
         sys.exit(0)
 
@@ -88,20 +86,16 @@ class Client:
         print(f"{'quit | exit':20}{'':25}{'Disconnect the client.'}")
 
     def taskmaster_shell(self):
-        RED = "\033[31;20m"
-        BLUE = "\033[36m"
-        GREEN = "\033[32;20m"
-        RESET = "\033[0m"
-        COLOR = GREEN
+        COLOR = Logger.GREEN
         COMMANDS = {
-            "help": 1, "quit": 1, "exit": 1, "shutdown": 1,
-            "status": 0, "start": 0, "stop": 0, "restart": 0, "reload": 0
+            "help": 1, "quit": 1, "exit": 1, "shutdown": 1, "reload": 0,
+            "status": 0, "start": 0, "stop": 0, "restart": 0
         }
         while True:
             try:
-                shell_input = input(f"{COLOR}->{BLUE} taskmaster{RESET} ")
+                shell_input = input(f"{COLOR}->{Logger.BLUE} taskmaster{Logger.RESET} ")
             except EOFError: #ctrl+D
-                COLOR = RED
+                COLOR = Logger.RED
                 print()
                 self.close_client()
             except KeyboardInterrupt: #ctrl+C
@@ -110,7 +104,7 @@ class Client:
             try:
                 ligne = shlex.split(shell_input)
             except ValueError as e:
-                COLOR = RED
+                COLOR = Logger.RED
                 print(f"syntax error: {e}")
                 continue
             if not ligne:
@@ -118,15 +112,15 @@ class Client:
             cmd = ligne[0]
             args = ligne[1:]
             if cmd not in COMMANDS:
-                COLOR = RED
+                COLOR = Logger.RED
                 print(f"taskmaster: command not found: {cmd}")
                 print("Try 'help' to see the list of commands.")
                 continue
             if args and COMMANDS[cmd]:
-                COLOR = RED
+                COLOR = Logger.RED
                 print(f"{cmd}: too many arguments: {args}")
                 continue
-            COLOR = GREEN
+            COLOR = Logger.GREEN
             if cmd == "help":
                 self.cmd_help()
             elif cmd in ("quit", "exit"):
