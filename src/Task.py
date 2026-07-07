@@ -1,6 +1,6 @@
 from pathlib import Path
-from typing import Literal
-from pydantic import BaseModel, Field, PositiveInt, NonNegativeInt, field_validator
+from typing import Literal, Any
+from pydantic import BaseModel, Field, PositiveInt, NonNegativeInt, field_validator, model_validator
 
 class Task(BaseModel):
     cmd: str
@@ -14,10 +14,20 @@ class Task(BaseModel):
     starttime: NonNegativeInt
     stopsignal: str
     stoptime: NonNegativeInt
-    stdout: Path
-    stderr: Path
+    stdout: Path | None = None
+    stderr: Path | None = None
     env: dict[str, str] = Field(default_factory=dict)
     retry_count: int = Field(default=1)
+
+    @model_validator(mode='before')
+    @classmethod
+    def prevent_internal_fields(cls, data: Any) -> Any:
+        internal_fields: list[str] = ['retry_count']
+        if isinstance(data, dict):
+            for field in internal_fields:
+                if field in data:
+                    raise ValueError("The 'retry_count field is strictly for internal use and cannot be defined in the configuration file.")
+        return data
 
     @field_validator('env', mode='before')
     @classmethod

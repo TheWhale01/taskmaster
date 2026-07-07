@@ -25,17 +25,22 @@ class Server:
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
         parser = argparse.ArgumentParser()
-        parser.add_argument("config")
+        parser.add_argument("config", help="Specifies the programs to run")
+        parser.add_argument("-d", "--daemon", action='store_true', help='Run server in the background')
+        parser.add_argument("-H", "--host", default=host, action='store', help='host on which the server should run')
+        parser.add_argument("-p", "--port", default=port, action='store', help='port on which the server should run')
         args = parser.parse_args()
-        self.filename = args.config
         self.host = host
         self.port = port
-        self.logger = logging.Logger("TaskmasterServer")
-        self.setup_logger(logging.DEBUG)
+        self.filename = args.config
         self.tasks: dict[str, Task] = {}
-        self.socket: Optional[socket.socket] = self.get_socket()
         self.active_processes: dict[str, list[Popen]] = {}
         self.pending_spawns: list = []
+        if args.daemon:
+            self.daemonize()
+        self.logger = logging.Logger("TaskmasterServer")
+        self.setup_logger(logging.DEBUG)
+        self.socket: Optional[socket.socket] = self.get_socket()
         self.reload_file()
         self.commands = {
             "status":   self.cmd_status,
@@ -56,6 +61,25 @@ class Server:
             self.logger.error(f"Failed to establish connection to client. {e}")
             return None
         return sock
+
+    def daemonize(self):
+        try:
+            if os.fork() > 0:
+                sys.exit(0)
+            os.setsid()
+            os.umask(0)
+            if os.fork() > 0:
+                sys.exit(0)
+        except OSError as e:
+            print(f"Failed to daemonize the server. {e}. Exiting", file=sys.stderr)
+            sys.exit(1)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        with open(os.devnull, 'r') as file:
+            os.dup2(file.fileno(), sys.stdin.fileno())
+        with open(os.devnull, 'a+') as file:
+            os.dup2(file.fileno(), sys.stdout.fileno())
+            os.dup2(file.fileno(), sys.stderr.fileno())
 
     def shutdown_server(self):
         try:
@@ -81,12 +105,9 @@ class Server:
         console_handler = logging.StreamHandler()
         console_handler.setLevel(log_level)
         console_handler.setFormatter(Logger())
-        file_handler = RotatingFileHandler(
-            # Creates files of 5MB max
-            logs_path, maxBytes=5*1024*1024
-        )
+        file_handler = RotatingFileHandler(logs_path, maxBytes=5*1024*1024, mode='w')
         file_handler.setLevel(log_level)
-        file_handler.setFormatter(Logger())
+        file_handler.setFormatter(logging.Formatter(fmt=Logger.CLEAN_FORMAT, datefmt=Logger.DATE_FORMAT))
         self.logger.addHandler(console_handler)
         self.logger.addHandler(file_handler)
 
@@ -96,7 +117,8 @@ class Server:
 
     def get_logfiles(self, task: Task) -> tuple:
         mode: str = 'a'
-        return (open(task.stdout, mode), open(task.stderr, mode))
+
+        return (open(task.stdout, mode) if task.stdout else None, open(task.stderr, mode) if task.stderr else None)
 
     def get_env(self, task: Task) -> dict[str, str]:
         env: dict[str, str] = os.environ.copy()
@@ -228,9 +250,15 @@ class Server:
         with open(self.filename, 'r') as file:
             conf = yaml.safe_load(file)
             new_tasks: dict[str, Task] = {}
-            for key, value in conf['programs'].items():
-                new_tasks[key] = Task(**value)
-            self.process_new_config(new_tasks)
+            try:
+                for key, value in conf['programs'].items():
+                    new_tasks[key] = Task(**value)
+                self.process_new_config(new_tasks)
+            except Exception as e:
+                self.active_processes = {}
+                self.pending_spawns = []
+                self.tasks = {}
+                self.logger.error(f"Failed to parse {self.filename}: {e}")
 
     def cmd_status(self, args):
         status: str = ''
