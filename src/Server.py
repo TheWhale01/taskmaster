@@ -1,4 +1,3 @@
-from datetime import datetime
 import os
 import sys
 import time
@@ -286,7 +285,7 @@ class Server:
         return(f"File: {self.filename} reloaded")
 
     def cmd_shutdown(self, args):
-        return("shutdown")
+        self.shutdown_server()
 
     def handle_cmd(self, cmd, arg):
         function = self.commands[cmd]
