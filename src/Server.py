@@ -9,6 +9,7 @@ import select
 import socket
 import signal
 import logging
+import requests
 import argparse
 import subprocess
 from Task import Task
@@ -17,34 +18,27 @@ from pathlib import Path
 from Logger import Logger
 from typing import Optional
 from subprocess import Popen
+from TaskmasterSession import TaskmasterSession
 from logging.handlers import RotatingFileHandler
 
 class Server:
     def __init__(self, host: str = '127.0.0.1', port: int = 8080, pid_filepath: str = 'taskmaster.pid'):
-        signal.signal(signal.SIGHUP, self.signal_handler)
-        signal.signal(signal.SIGINT, self.signal_handler)
-        signal.signal(signal.SIGTERM, self.signal_handler)
-        parser = argparse.ArgumentParser()
-        parser.add_argument("config", help="Specifies the programs to run")
-        parser.add_argument("-d", "--daemon", action='store_true', help='Run server in the background')
-        parser.add_argument("-H", "--host", default=host, action='store', help='host on which the server should run')
-        parser.add_argument("-p", "--port", default=port, action='store', help='port on which the server should run')
-        parser.add_argument("-P", "--pidfile", default=pid_filepath, action='store', help='Path to the file where the pid of the server should be written')
-        args = parser.parse_args()
+        args = self.parse_args(host, port, pid_filepath)
+        self.setup_signals()
+        self.filename = args.config
         self.host = args.host
         self.port = args.port
         self.pidfile = args.pidfile
-        self.filename = args.config
         self.tasks: dict[str, Task] = {}
         self.active_processes: dict[str, list[Popen]] = {}
         self.pending_spawns: list = []
-        if args.daemon:
-            self.daemonize()
+        self.daemonize(args.daemon)
         self.logger = logging.Logger("TaskmasterServer")
         self.setup_logger(logging.DEBUG)
         self.descalate()
         self.check_pid()
         self.socket: Optional[socket.socket] = self.get_socket()
+        self.webhook_session: Optional[TaskmasterSession] = self.get_webhook_session(args.webhook)
         self.reload_file()
         self.commands = {
             "status":   self.cmd_status,
@@ -54,6 +48,27 @@ class Server:
             "reload":   self.cmd_reload,
             "shutdown": self.cmd_shutdown,
         }
+
+    def get_webhook_session(self, webhook_url: Optional[str]) -> Optional[TaskmasterSession]:
+        if webhook_url is None:
+            return None
+        session = TaskmasterSession(webhook_url)
+        return session
+
+    def setup_signals(self):
+        signal.signal(signal.SIGHUP, self.signal_handler)
+        signal.signal(signal.SIGINT, self.signal_handler)
+        signal.signal(signal.SIGTERM, self.signal_handler)
+
+    def parse_args(self, host: str, port: int, pid_filepath: str):
+        parser = argparse.ArgumentParser()
+        parser.add_argument("config", help="Specifies the programs to run")
+        parser.add_argument("-d", "--daemon", action='store_true', help='Run server in the background')
+        parser.add_argument("-H", "--host", default=host, action='store', help='host on which the server should run')
+        parser.add_argument("-p", "--port", default=port, action='store', help='port on which the server should run')
+        parser.add_argument("-P", "--pidfile", default=pid_filepath, action='store', help='Path to the file where the pid of the server should be written')
+        parser.add_argument('-w', '--webhook', default=None, action='store', help='Url to webhook service')
+        return parser.parse_args()
 
     def get_socket(self) -> Optional[socket.socket]:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -104,7 +119,9 @@ class Server:
             self.logger.critical(f"Failed to drop privileges: {e}. Exiting.")
             sys.exit(1)
 
-    def daemonize(self):
+    def daemonize(self, daemon_mode: bool):
+        if not daemon_mode:
+            return
         try:
             if os.fork() > 0:
                 sys.exit(0)
@@ -161,7 +178,6 @@ class Server:
 
     def get_logfiles(self, task: Task) -> tuple:
         mode: str = 'a'
-
         return (open(task.stdout, mode) if task.stdout else None, open(task.stderr, mode) if task.stderr else None)
 
     def get_env(self, task: Task) -> dict[str, str]:
@@ -208,6 +224,10 @@ class Server:
                 elif task.retry_count == task.startretries:
                     self.logger.error(f"Failed to spawn process {name}. {e}")
                 return
+        self.webhook_session.post("taskmaster", json={
+            'task': task.model_dump(mode='json'),
+            'status': 'spawned'
+        })
         self.logger.info(f"Successfully spawned task {name}")
 
     def stop_all_task(self):
@@ -385,6 +405,10 @@ class Server:
                 self.schedule_spawn(name, task)
             elif task.retry_count == task.startretries:
                 self.logger.error(f"Failed to start process {name} due to repeated crashes.")
+                self.webhook_session.post("taskmaster", json={
+                    'task': task.model_dump(mode='json'),
+                    'status': 'failed'
+                })
 
     def monitor_processes(self):
         current_time = time.time()
