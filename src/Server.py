@@ -20,7 +20,7 @@ from subprocess import Popen
 from logging.handlers import RotatingFileHandler
 
 class Server:
-    def __init__(self, host: str = '127.0.0.1', port: int = 8080):
+    def __init__(self, host: str = '127.0.0.1', port: int = 8080, pid_filepath: str = 'taskmaster.pid'):
         signal.signal(signal.SIGHUP, self.signal_handler)
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -29,9 +29,11 @@ class Server:
         parser.add_argument("-d", "--daemon", action='store_true', help='Run server in the background')
         parser.add_argument("-H", "--host", default=host, action='store', help='host on which the server should run')
         parser.add_argument("-p", "--port", default=port, action='store', help='port on which the server should run')
+        parser.add_argument("-P", "--pidfile", default=pid_filepath, action='store', help='Path to the file where the pid of the server should be written')
         args = parser.parse_args()
-        self.host = host
-        self.port = port
+        self.host = args.host
+        self.port = args.port
+        self.pidfile = args.pidfile
         self.filename = args.config
         self.tasks: dict[str, Task] = {}
         self.active_processes: dict[str, list[Popen]] = {}
@@ -40,6 +42,8 @@ class Server:
             self.daemonize()
         self.logger = logging.Logger("TaskmasterServer")
         self.setup_logger(logging.DEBUG)
+        self.descalate()
+        self.check_pid()
         self.socket: Optional[socket.socket] = self.get_socket()
         self.reload_file()
         self.commands = {
@@ -62,6 +66,44 @@ class Server:
             return None
         return sock
 
+    def check_pid(self):
+        if os.path.exists(self.pidfile):
+            with open(self.pidfile, 'r') as file:
+                pid: int = int(file.readline().strip())
+            try:
+                os.kill(pid, 0)
+                self.logger.error(f"Could not start taskmaster. Another instance is already running (PID: {pid}).")
+                sys.exit(1)
+            except (ProcessLookupError, ValueError) as e:
+                self.logger.info(f"No previous taskmaster server found with pid: {pid}. {e}")
+            except PermissionError:
+                self.logger.error(f"Taskmaster is already running (PID: {pid}) under a different user. Exiting.")
+                sys.exit(1)
+        with open(self.pidfile, "w") as file:
+            file.write(str(os.getpid()))
+
+    def descalate(self):
+        if os.geteuid() != 0:
+            return
+        self.logger.info("Taskmaster Server started as root detected.")
+        sudo_uid: Optional[str] = os.environ.get("SUDO_UID")
+        sudo_gid: Optional[str] = os.environ.get("SUDO_GID")
+        if not sudo_uid or not sudo_gid:
+            sudo_uid = 1000
+            sudo_gid = 1000
+            self.logger.warning(f"Started as root without sudo. Defaulting to {sudo_uid}:{sudo_gid}")
+        else:
+            sudo_uid = int(sudo_uid)
+            sudo_gid = int(sudo_gid)
+        try:
+            os.setgroups([])
+            os.setgid(sudo_gid)
+            os.setuid(sudo_uid)
+            self.logger.info("Privilege de-escalation done.")
+        except OSError as e:
+            self.logger.critical(f"Failed to drop privileges: {e}. Exiting.")
+            sys.exit(1)
+
     def daemonize(self):
         try:
             if os.fork() > 0:
@@ -82,12 +124,14 @@ class Server:
             os.dup2(file.fileno(), sys.stderr.fileno())
 
     def shutdown_server(self):
+        self.stop_all_task()
         try:
             if self.socket is not None:
                 self.socket.close()
         except Exception:
             pass
-        self.stop_all_task()
+        if os.path.exists(self.pidfile):
+            os.unlink(self.pidfile)
         self.logger.info("The server has been successfully shutdown.")
         sys.exit(0)
 
@@ -191,7 +235,7 @@ class Server:
             proc.send_signal(self.get_signal(task.stopsignal))
             try:
                 proc.wait(timeout=task.stoptime)
-            except (subprocess.TimeoutExpired):
+            except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
         del self.active_processes[name]
