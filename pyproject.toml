@@ -2,7 +2,7 @@
 name = "taskmaster"
 version = "0.1.0"
 dependencies = [
-    "fastapi>=0.139.0",
+    "fastapi[standard]>=0.139.0",
     "pydantic>=2.13.4",
     "pyyaml>=6.0.3",
     "requests>=2.34.2",
@@ -11,6 +11,10 @@ dependencies = [
 [project.scripts]
 server = "server:main"
 client = "client:main"
+webhook = "webhook:main"
 
 [tool.uv]
 package = true
+
+[tool.fastapi]
+entrypoint = "webhook:app"

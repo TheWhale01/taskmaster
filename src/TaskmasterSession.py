@@ -3,7 +3,7 @@ from typing import Optional
 from urllib.parse import urljoin
 
 class TaskmasterSession(requests.Session):
-    def __init__(self, base_url: Optional[str] = None)
+    def __init__(self, base_url: Optional[str] = None):
         super().__init__()
         self.base_url = base_url
 

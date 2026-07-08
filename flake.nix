@@ -32,6 +32,10 @@
         type = "app";
         program = "${venv}/bin/client";
       };
+      webhook = {
+        type = "app";
+        program = "${venv}/bin/webhook";
+      };
     };
     devShells.${system}.default = pkgs.mkShell {
       packages = [

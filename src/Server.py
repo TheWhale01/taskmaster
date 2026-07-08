@@ -18,6 +18,7 @@ from pathlib import Path
 from Logger import Logger
 from typing import Optional
 from subprocess import Popen
+from NotificationItem import NotificationItem
 from TaskmasterSession import TaskmasterSession
 from logging.handlers import RotatingFileHandler
 
@@ -48,6 +49,13 @@ class Server:
             "reload":   self.cmd_reload,
             "shutdown": self.cmd_shutdown,
         }
+
+    def send_webhook_notif(self, body: NotificationItem):
+        if self.webhook_session is None:
+            return
+        response: requests.Response = self.webhook_session.post('taskmaster', json=body.model_dump(mode='json'))
+        if not response.ok:
+            self.logger.warning(f"Could not notify webhook. {response.text}")
 
     def get_webhook_session(self, webhook_url: Optional[str]) -> Optional[TaskmasterSession]:
         if webhook_url is None:
@@ -89,11 +97,11 @@ class Server:
                 os.kill(pid, 0)
                 self.logger.error(f"Could not start taskmaster. Another instance is already running (PID: {pid}).")
                 sys.exit(1)
-            except (ProcessLookupError, ValueError) as e:
-                self.logger.info(f"No previous taskmaster server found with pid: {pid}. {e}")
             except PermissionError:
                 self.logger.error(f"Taskmaster is already running (PID: {pid}) under a different user. Exiting.")
                 sys.exit(1)
+            except (ProcessLookupError, ValueError) as e:
+                self.logger.info(f"No previous taskmaster server found with pid: {pid}. {e}")
         with open(self.pidfile, "w") as file:
             file.write(str(os.getpid()))
 
@@ -101,15 +109,8 @@ class Server:
         if os.geteuid() != 0:
             return
         self.logger.info("Taskmaster Server started as root detected.")
-        sudo_uid: Optional[str] = os.environ.get("SUDO_UID")
-        sudo_gid: Optional[str] = os.environ.get("SUDO_GID")
-        if not sudo_uid or not sudo_gid:
-            sudo_uid = 1000
-            sudo_gid = 1000
-            self.logger.warning(f"Started as root without sudo. Defaulting to {sudo_uid}:{sudo_gid}")
-        else:
-            sudo_uid = int(sudo_uid)
-            sudo_gid = int(sudo_gid)
+        sudo_uid: int = int(os.environ.get("SUDO_UID") or 1000)
+        sudo_gid: int = int(os.environ.get("SUDO_GID") or 1000)
         try:
             os.setgroups([])
             os.setgid(sudo_gid)
@@ -207,6 +208,7 @@ class Server:
             'task': task
         })
         self.logger.info(f"Scheduled task {name} to start in {task.starttime} seconds.")
+        self.send_webhook_notif(NotificationItem(taskname=name, task=task, status='scheduled', retries=task.retry_count))
 
     def spawn_task(self, name: str, task: Task, nb_procs: int = -1, flush_processes: bool = True):
         if flush_processes or name not in self.active_processes:
@@ -217,6 +219,7 @@ class Server:
             try:
                 self.create_process(name, task)
             except Exception as e:
+                self.send_webhook_notif(NotificationItem(taskname=name, task=task, status='crashed', retries=task.retry_count))
                 if task.retry_count < task.startretries:
                     self.logger.warning(f"Failed to spawn process {name}. {e}. Retrying")
                     task.retry_count += 1
@@ -224,11 +227,8 @@ class Server:
                 elif task.retry_count == task.startretries:
                     self.logger.error(f"Failed to spawn process {name}. {e}")
                 return
-        self.webhook_session.post("taskmaster", json={
-            'task': task.model_dump(mode='json'),
-            'status': 'spawned'
-        })
         self.logger.info(f"Successfully spawned task {name}")
+        self.send_webhook_notif(NotificationItem(taskname=name, task=task, status='spawned', retries=task.retry_count))
 
     def stop_all_task(self):
         for name in self.tasks.keys():
@@ -395,8 +395,10 @@ class Server:
             is_expected = exit_code == task.exitcodes
         if is_expected:
             self.logger.info(f"Process {name} (PID: {proc.pid}) gracefully exited with code {exit_code}")
+            self.send_webhook_notif(NotificationItem(taskname=name, task=task, status='stopped', retries=task.retry_count))
         else:
             self.logger.warning(f"Process {name} (PID: {proc.pid}) exited unexpectedly with code {exit_code}")
+            self.send_webhook_notif(NotificationItem(taskname=name, task=task, status='crashed', retries=task.retry_count))
         needs_restart: bool = task.autorestart == 'always' or (task.autorestart == 'unexpected' and not is_expected)
         if needs_restart:
             if task.retry_count < task.startretries:
@@ -405,10 +407,6 @@ class Server:
                 self.schedule_spawn(name, task)
             elif task.retry_count == task.startretries:
                 self.logger.error(f"Failed to start process {name} due to repeated crashes.")
-                self.webhook_session.post("taskmaster", json={
-                    'task': task.model_dump(mode='json'),
-                    'status': 'failed'
-                })
 
     def monitor_processes(self):
         current_time = time.time()

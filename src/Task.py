@@ -17,7 +17,7 @@ class Task(BaseModel):
     stdout: Path | None = None
     stderr: Path | None = None
     env: dict[str, str] = Field(default_factory=dict)
-    retry_count: int = Field(default=1)
+    retry_count: int = Field(default=1, exclude=True)
 
     @model_validator(mode='before')
     @classmethod
