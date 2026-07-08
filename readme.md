@@ -4,13 +4,12 @@ This project is about job control. It's made in Python.
 
 ## How to setup 
 
-
 ### Nix:
 
 ```bash
 nix develop .
-python3 src/server.py
-python3 src/client.py
+nix run .#server -- config.yaml
+nix run .#client
 ```
 
 ### Other distributions
@@ -18,5 +17,6 @@ python3 src/client.py
 > __*NOTE:*__ Please ensure that Python >=3.14 is installed
 
 ```bash
-python3 src/main.py
+uv run server config.yaml
+uv run client
 ```
