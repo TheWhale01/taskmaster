@@ -2,7 +2,7 @@
 name = "taskmaster"
 version = "0.1.0"
 dependencies = [
-    "fastapi[standard]>=0.139.0",
+    "fastapi>=0.139.0",
     "pydantic>=2.13.4",
     "pyyaml>=6.0.3",
     "requests>=2.34.2",
