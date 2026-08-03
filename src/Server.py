@@ -23,7 +23,7 @@ from TaskmasterSession import TaskmasterSession
 from logging.handlers import RotatingFileHandler
 
 class Server:
-    def __init__(self, host: str = '127.0.0.1', port: int = 8080, pid_filepath: str = 'taskmaster.pid'):
+    def __init__(self, host: str = '127.0.0.1', port: int = 8080, pid_filepath: str = './taskmaster.pid'):
         args = self.parse_args(host, port, pid_filepath)
         self.setup_signals()
         self.filename = args.config
@@ -38,8 +38,8 @@ class Server:
         self.setup_logger(logging.DEBUG)
         self.descalate()
         self.check_pid()
-        self.socket: Optional[socket.socket] = self.get_socket()
-        self.webhook_session: Optional[TaskmasterSession] = self.get_webhook_session(args.webhook)
+        self.socket: socket.socket | None = self.get_socket()
+        self.webhook_session: TaskmasterSession | None = self.get_webhook_session(args.webhook)
         self.reload_file()
         self.commands = {
             "status":   self.cmd_status,
@@ -57,7 +57,7 @@ class Server:
         if not response.ok:
             self.logger.warning(f"Could not notify webhook. {response.text}")
 
-    def get_webhook_session(self, webhook_url: Optional[str]) -> Optional[TaskmasterSession]:
+    def get_webhook_session(self, webhook_url: str | None) -> TaskmasterSession | None:
         if webhook_url is None:
             return None
         session = TaskmasterSession(webhook_url)
@@ -78,7 +78,7 @@ class Server:
         parser.add_argument('-w', '--webhook', default=None, action='store', help='Url to webhook service')
         return parser.parse_args()
 
-    def get_socket(self) -> Optional[socket.socket]:
+    def get_socket(self) -> socket.socket | None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -243,7 +243,7 @@ class Server:
             return signal.SIGTERM
 
     def despawn_task(self, name: str, task: Task, nb_procs: int = -1):
-        if name not in self.active_processes.keys():
+        if name not in self.active_processes:
             return
         procs = self.active_processes[name]
         if nb_procs == -1:
@@ -258,7 +258,7 @@ class Server:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
-        del self.active_processes[name]
+        self.active_processes.pop(name)
         self.logger.info(f"Despawned {nb_procs} process(es) of {name}")
 
     def update_numprocs(self, name: str, task: Task):
@@ -301,6 +301,7 @@ class Server:
                 self.schedule_spawn(name, new_tasks[name])
         for name in removed:
             self.despawn_task(name, self.tasks[name])
+            self.tasks.pop(name)
         for name in updated:
             if self.tasks[name] == new_tasks[name]:
                 continue
@@ -327,14 +328,14 @@ class Server:
     def cmd_status(self, args):
         status: str = ''
         if len(args) == 0:
-            args = [name for name in self.tasks.keys()]
+            args = [name for name in self.tasks]
         for taskname in args:
             status += f'{taskname:20}\t'
-            if taskname in self.active_processes.keys():
+            if taskname in self.active_processes:
                 status += "RUNNING"
             elif any(taskname == name for task in self.pending_spawns for name in task.values()):
                 status += "PENDING"
-            elif taskname not in self.tasks.keys():
+            elif taskname not in self.tasks:
                 status += "UNKNOWN TASK"
             else:
                 status += "STOPPED"
@@ -347,12 +348,12 @@ class Server:
         failed = []
         success = []
         if len(args) == 0:
-            args = [name for name in self.tasks.keys()]
+            args = [name for name in self.tasks]
         for taskname in args:
-            if taskname not in self.tasks.keys():
+            if taskname not in self.tasks:
                 failed.append(taskname)
                 continue
-            if taskname not in self.active_processes.keys():
+            if taskname not in self.active_processes:
                 success.append(taskname)
                 self.tasks[taskname].retry_count = 1
                 self.schedule_spawn(taskname, self.tasks[taskname])
@@ -365,9 +366,9 @@ class Server:
 
     def cmd_stop(self, args):
         if len(args) == 0:
-            args = [name for name in self.tasks.keys()]
+            args = [name for name in self.tasks]
         for taskname in args:
-            if taskname in self.active_processes.keys():
+            if taskname in self.active_processes:
                 self.despawn_task(taskname, self.tasks[taskname])
         return(f"Stopped programs: {' '.join(args)}")
 
@@ -417,7 +418,7 @@ class Server:
                 self.pending_spawns.pop(i)
         for name, task in self.tasks.items():
             alive_processes: list[Popen] = []
-            if name not in self.active_processes.keys():
+            if name not in self.active_processes:
                 continue
             for proc in self.active_processes[name]:
                 exit_code = proc.poll()
@@ -432,7 +433,7 @@ class Server:
     def launch(self):
         if self.socket is None:
             self.logger.error("Socket not initialized. Exiting server.")
-            exit(1)
+            sys.exit(1)
         self.socket.listen()
         self.logger.info(f"Server successfully started on {self.host}:{self.port}")
         input_sockets: list[socket.socket] = [self.socket]
@@ -464,7 +465,7 @@ class Server:
                             sock.sendall(response.encode())
                     except ConnectionResetError:
                         input_sockets.remove(sock)
-                        if sock in input_buffers.keys():
-                            del input_buffers[sock]
+                        if sock in input_buffers:
+                            input_buffers.pop(sock)
                         sock.close()
                         self.logger.info("Client unexpectedly closed the connection from server.")
