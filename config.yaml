@@ -5,7 +5,7 @@ programs:
     umask: 077
     workingdir: /tmp
     autostart: true
-    autorestart: unexpected
+    autorestart: always
     exitcodes:
       - 0
       - 2

@@ -16,7 +16,6 @@ from Task import Task
 from typing import Any
 from pathlib import Path
 from Logger import Logger
-from typing import Optional
 from subprocess import Popen
 from NotificationItem import NotificationItem
 from TaskmasterSession import TaskmasterSession
@@ -32,7 +31,7 @@ class Server:
         self.pidfile = args.pidfile
         self.tasks: dict[str, Task] = {}
         self.active_processes: dict[str, list[Popen]] = {}
-        self.pending_spawns: list = []
+        self.wait_success_start: list = []
         self.daemonize(args.daemon)
         self.logger = logging.Logger("TaskmasterServer")
         self.setup_logger(logging.DEBUG)
@@ -153,7 +152,7 @@ class Server:
         self.logger.info("The server has been successfully shutdown.")
         sys.exit(0)
 
-    def signal_handler(self, sig, context):
+    def signal_handler(self, sig):
         if sig == signal.SIGHUP:
             self.reload_file()
         elif sig in (signal.SIGINT, signal.SIGTERM):
@@ -186,7 +185,7 @@ class Server:
         env.update(task.env)
         return env
 
-    def create_process(self, name: str, task: Task):
+    def create_process(self, name: str, task: Task, target_time):
         env: dict[str, str] = self.get_env(task)
         logfiles: tuple = self.get_logfiles(task)
         proc = Popen(
@@ -198,17 +197,34 @@ class Server:
             # Setting the umask inside the child process
             preexec_fn=lambda: os.umask(task.umask)
         )
-        self.active_processes[name].append(proc)
+        if time.time() >= target_time:
+            self.active_processes[name].append(proc)
+            self.wait_success_start.pop(name)
+        else
+            self.wait_success_start[name] = task
 
-    def schedule_spawn(self, name: str, task: Task):
+    def schedule_wait(self, name: str, task: Task):
         target_time = time.time() + task.starttime
-        self.pending_spawns.append({
+        self.wait_success_start.append({
             'launch_time': target_time,
             'name': name,
             'task': task
         })
         self.logger.info(f"Scheduled task {name} to start in {task.starttime} seconds.")
         self.send_webhook_notif(NotificationItem(taskname=name, task=task, status='scheduled', retries=task.retry_count))
+
+    def apply_restart_policy(self, name: str, task: Task, ex: Exception | None = None):
+        if ex is not None:
+            self.logger.error(f"Failed to start process: {ex}")
+        if task.autorestart == 'never':
+            return
+        if task.retry_count < task.startretries:
+            self.logger.warning(f"Restarting process {name} based on policy {task.autorestart}")
+            if task.autorestart == 'unexpected':
+                task.retry_count += 1
+            self.schedule_spawn(name, task)
+        elif task.retry_count == task.startretries:
+            self.logger.error(f"Failed to start process {name} due to repeated crashes.")
 
     def spawn_task(self, name: str, task: Task, nb_procs: int = -1, flush_processes: bool = True):
         if flush_processes or name not in self.active_processes:
@@ -220,12 +236,7 @@ class Server:
                 self.create_process(name, task)
             except Exception as e:
                 self.send_webhook_notif(NotificationItem(taskname=name, task=task, status='crashed', retries=task.retry_count))
-                if task.retry_count < task.startretries:
-                    self.logger.warning(f"Failed to spawn process {name}. {e}. Retrying")
-                    task.retry_count += 1
-                    self.schedule_spawn(name, task)
-                elif task.retry_count == task.startretries:
-                    self.logger.error(f"Failed to spawn process {name}. {e}")
+                self.apply_restart_policy(name, task, e)
                 return
         self.logger.info(f"Successfully spawned task {name}")
         self.send_webhook_notif(NotificationItem(taskname=name, task=task, status='spawned', retries=task.retry_count))
@@ -298,7 +309,7 @@ class Server:
         for name in added:
             self.tasks[name] = new_tasks[name]
             if self.tasks[name].autostart:
-                self.schedule_spawn(name, new_tasks[name])
+                self.schedule_wait(name, new_tasks[name])
         for name in removed:
             self.despawn_task(name, self.tasks[name])
             self.tasks.pop(name)
@@ -402,19 +413,14 @@ class Server:
             self.send_webhook_notif(NotificationItem(taskname=name, task=task, status='crashed', retries=task.retry_count))
         needs_restart: bool = task.autorestart == 'always' or (task.autorestart == 'unexpected' and not is_expected)
         if needs_restart:
-            if task.retry_count < task.startretries:
-                self.logger.warning(f"Restarting process {name} based on policy {task.autorestart}")
-                task.retry_count += 1
-                self.schedule_spawn(name, task)
-            elif task.retry_count == task.startretries:
-                self.logger.error(f"Failed to start process {name} due to repeated crashes.")
+            self.apply_restart_policy(name, task)
 
     def monitor_processes(self):
         current_time = time.time()
         for i in range(len(self.pending_spawns) - 1, -1, -1):
             pending = self.pending_spawns[i]
+            self.spawn_task(pending['name'], pending['task'], self.tasks[pending['name']].numprocs, flush_processes=False)
             if current_time >= pending['launch_time']:
-                self.spawn_task(pending['name'], pending['task'], self.tasks[pending['name']].numprocs, flush_processes=False)
                 self.pending_spawns.pop(i)
         for name, task in self.tasks.items():
             alive_processes: list[Popen] = []
