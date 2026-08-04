@@ -6,4 +6,4 @@ class NotificationItem(BaseModel):
     taskname: str
     task: Task
     retries: int
-    status: Literal['scheduled', 'spawned', 'stopped', 'crashed']
+    status: Literal['started', 'healthy', 'stopped', 'crashed']

@@ -13,7 +13,6 @@ import requests
 import argparse
 import subprocess
 from Task import Task
-from typing import Any
 from pathlib import Path
 from Logger import Logger
 from subprocess import Popen
@@ -31,7 +30,7 @@ class Server:
         self.pidfile = args.pidfile
         self.tasks: dict[str, Task] = {}
         self.active_processes: dict[str, list[Popen]] = {}
-        self.wait_success_start: list = []
+        self.wait_success_start: dict = {}
         self.daemonize(args.daemon)
         self.logger = logging.Logger("TaskmasterServer")
         self.setup_logger(logging.DEBUG)
@@ -39,7 +38,6 @@ class Server:
         self.check_pid()
         self.socket: socket.socket | None = self.get_socket()
         self.webhook_session: TaskmasterSession | None = self.get_webhook_session(args.webhook)
-        self.reload_file()
         self.commands = {
             "status":   self.cmd_status,
             "start":    self.cmd_start,
@@ -152,7 +150,7 @@ class Server:
         self.logger.info("The server has been successfully shutdown.")
         sys.exit(0)
 
-    def signal_handler(self, sig):
+    def signal_handler(self, sig, context):
         if sig == signal.SIGHUP:
             self.reload_file()
         elif sig in (signal.SIGINT, signal.SIGTERM):
@@ -185,45 +183,28 @@ class Server:
         env.update(task.env)
         return env
 
-    def create_process(self, name: str, task: Task, target_time):
+    def create_process(self, name: str, task: Task) -> Popen:
         env: dict[str, str] = self.get_env(task)
         logfiles: tuple = self.get_logfiles(task)
-        proc = Popen(
+        return Popen(
             self.get_cmd(task, env),
             cwd=task.workingdir,
             env=env,
             stdout=logfiles[0],
             stderr=logfiles[1],
-            # Setting the umask inside the child process
             preexec_fn=lambda: os.umask(task.umask)
         )
-        if time.time() >= target_time:
-            self.active_processes[name].append(proc)
-            self.wait_success_start.pop(name)
-        else
-            self.wait_success_start[name] = task
 
-    def schedule_wait(self, name: str, task: Task):
-        target_time = time.time() + task.starttime
-        self.wait_success_start.append({
-            'launch_time': target_time,
-            'name': name,
-            'task': task
-        })
-        self.logger.info(f"Scheduled task {name} to start in {task.starttime} seconds.")
-        self.send_webhook_notif(NotificationItem(taskname=name, task=task, status='scheduled', retries=task.retry_count))
-
-    def apply_restart_policy(self, name: str, task: Task, ex: Exception | None = None):
+    def apply_restart_policy(self, name: str, task: Task, ex: Exception | None = None, is_expected: bool = False):
         if ex is not None:
             self.logger.error(f"Failed to start process: {ex}")
         if task.autorestart == 'never':
             return
         if task.retry_count < task.startretries:
             self.logger.warning(f"Restarting process {name} based on policy {task.autorestart}")
-            if task.autorestart == 'unexpected':
-                task.retry_count += 1
-            self.schedule_spawn(name, task)
-        elif task.retry_count == task.startretries:
+            task.retry_count += 1
+            self.spawn_task(name, task)
+        elif (not is_expected or ex is not None) and task.retry_count == task.startretries:
             self.logger.error(f"Failed to start process {name} due to repeated crashes.")
 
     def spawn_task(self, name: str, task: Task, nb_procs: int = -1, flush_processes: bool = True):
@@ -231,15 +212,27 @@ class Server:
             self.active_processes[name] = []
         if nb_procs == -1:
             nb_procs = task.numprocs
-        for _ in range(nb_procs):
-            try:
-                self.create_process(name, task)
-            except Exception as e:
-                self.send_webhook_notif(NotificationItem(taskname=name, task=task, status='crashed', retries=task.retry_count))
-                self.apply_restart_policy(name, task, e)
-                return
-        self.logger.info(f"Successfully spawned task {name}")
-        self.send_webhook_notif(NotificationItem(taskname=name, task=task, status='spawned', retries=task.retry_count))
+        try:
+            for _ in range(nb_procs):
+                proc: Popen = self.create_process(name, task)
+                if task.starttime != 0:
+                    self.wait_success_start.setdefault(name, {}).setdefault('procs', []).append(proc)
+                else:
+                    self.active_processes.setdefault(name, []).append(proc)
+            if task.starttime != 0:
+                self.wait_success_start[name].update({
+                    'task': task,
+                    'starttime': time.time() + task.starttime
+                })
+                self.logger.info(f"Started task {name}. Waiting {task.starttime} seconds for service to be healthy.")
+                self.send_webhook_notif(NotificationItem(taskname=name, task=task, status='started', retries=task.retry_count))
+            else:
+                self.logger.info(f"Started task {name}. Task {name} healthy.")
+                self.send_webhook_notif(NotificationItem(taskname=name, task=task, status='healthy', retries=task.retry_count))
+        except Exception as e:
+            self.send_webhook_notif(NotificationItem(taskname=name, task=task, status='crashed', retries=task.retry_count))
+            self.apply_restart_policy(name, task, e)
+            self.wait_success_start.pop(name, None)
 
     def stop_all_task(self):
         for name in self.tasks.keys():
@@ -279,24 +272,10 @@ class Server:
         elif nb_processes < task.numprocs:
             self.despawn_task(name, task, (task.numprocs - nb_processes))
 
-    def apply_update(self, name: str, key: str, value: Any):
-        self.logger.info("Update signal received")
-        setattr(self.tasks[name], key, value)
-        non_rebooting_fields: list[str] = [
-            'autostart',
-            'autorestart',
-            'exitcodes',
-            'startretries',
-            'starttime',
-            'stopsignal',
-            'stoptime'
-        ]
-        if key in non_rebooting_fields:
-            return
-        if key == 'numprocs':
-            self.update_numprocs(name, self.tasks[name])
-        else:
-            self.despawn_task(name, self.tasks[name])
+    def respawn_task(self, name: str):
+        self.tasks[name].retry_count = 1
+        self.despawn_task(name, self.tasks[name])
+        if self.tasks[name].autostart:
             self.spawn_task(name, self.tasks[name])
 
     def process_new_config(self, new_tasks: dict[str, Task]):
@@ -305,22 +284,25 @@ class Server:
             return
         added = new_tasks.keys() - self.tasks.keys()
         removed = self.tasks.keys() - new_tasks.keys()
-        updated = new_tasks.keys() & self.tasks.keys()
+        tasks = new_tasks.keys() & self.tasks.keys()
         for name in added:
             self.tasks[name] = new_tasks[name]
             if self.tasks[name].autostart:
-                self.schedule_wait(name, new_tasks[name])
+                self.spawn_task(name, new_tasks[name])
         for name in removed:
             self.despawn_task(name, self.tasks[name])
             self.tasks.pop(name)
-        for name in updated:
-            if self.tasks[name] == new_tasks[name]:
-                continue
+        for name in tasks:
+            respawn_task: bool = False
             old_field = self.tasks[name].model_dump()
             new_field = new_tasks[name].model_dump()
             for field in old_field:
                 if old_field[field] != new_field[field]:
-                    self.apply_update(name, field, new_field[field])
+                    respawn_task = True
+                    self.logger.debug(f"{field}: {new_field[field]}")
+                    setattr(self.tasks[name], field, new_field[field])
+            if respawn_task:
+                self.respawn_task(name)
 
     def reload_file(self):
         with open(self.filename, 'r') as file:
@@ -328,13 +310,10 @@ class Server:
             new_tasks: dict[str, Task] = {}
             try:
                 for key, value in conf['programs'].items():
-                    new_tasks[key] = Task(**value)
-                self.process_new_config(new_tasks)
+                    new_tasks.update({key: Task(**value)})
             except Exception as e:
-                self.active_processes = {}
-                self.pending_spawns = []
-                self.tasks = {}
                 self.logger.error(f"Failed to parse {self.filename}: {e}")
+        self.process_new_config(new_tasks)
 
     def cmd_status(self, args):
         status: str = ''
@@ -343,9 +322,9 @@ class Server:
         for taskname in args:
             status += f'{taskname:20}\t'
             if taskname in self.active_processes:
-                status += "RUNNING"
-            elif any(taskname == name for task in self.pending_spawns for name in task.values()):
-                status += "PENDING"
+                status += "HEALTHY"
+            elif taskname in self.wait_success_start.keys():
+                status += "STARTED"
             elif taskname not in self.tasks:
                 status += "UNKNOWN TASK"
             else:
@@ -358,6 +337,7 @@ class Server:
         started = []
         failed = []
         success = []
+        msg: str = ""
         if len(args) == 0:
             args = [name for name in self.tasks]
         for taskname in args:
@@ -367,13 +347,16 @@ class Server:
             if taskname not in self.active_processes:
                 success.append(taskname)
                 self.tasks[taskname].retry_count = 1
-                self.schedule_spawn(taskname, self.tasks[taskname])
+                self.spawn_task(taskname, self.tasks[taskname])
             else:
                 started.append(taskname)
-        started = ' '.join(started)
-        failed = ' '.join(failed)
-        success = ' '.join(success)
-        return (f"Started programs: {success}\nFailed to start: {failed}\nAlready running: {started}")
+        if len(success) != 0:
+            msg += f"Started: {' '.join(success)}\n"
+        if len(failed) != 0:
+            msg += f"Failed to start: {' '.join(failed)}\n"
+        if len(started) != 0:
+            msg += f"Already running: {' '.join(started)}\n"
+        return msg
 
     def cmd_stop(self, args):
         if len(args) == 0:
@@ -413,28 +396,26 @@ class Server:
             self.send_webhook_notif(NotificationItem(taskname=name, task=task, status='crashed', retries=task.retry_count))
         needs_restart: bool = task.autorestart == 'always' or (task.autorestart == 'unexpected' and not is_expected)
         if needs_restart:
-            self.apply_restart_policy(name, task)
+            self.apply_restart_policy(name, task, None, is_expected)
 
     def monitor_processes(self):
-        current_time = time.time()
-        for i in range(len(self.pending_spawns) - 1, -1, -1):
-            pending = self.pending_spawns[i]
-            self.spawn_task(pending['name'], pending['task'], self.tasks[pending['name']].numprocs, flush_processes=False)
-            if current_time >= pending['launch_time']:
-                self.pending_spawns.pop(i)
+        for taskname in list(self.wait_success_start.keys()):
+            task = self.wait_success_start[taskname]
+            if time.time() >= task['starttime']:
+                self.active_processes.update({taskname: task['procs']})
+                self.logger.info(f"Task {taskname} healthy.")
+                self.send_webhook_notif(NotificationItem(taskname=taskname, task=task['task'], retries=task['task'].retry_count, status='healthy'))
+                self.wait_success_start.pop(taskname)
         for name, task in self.tasks.items():
-            alive_processes: list[Popen] = []
             if name not in self.active_processes:
                 continue
             for proc in self.active_processes[name]:
                 exit_code = proc.poll()
-                if exit_code is None:
-                    alive_processes.append(proc)
-                else:
+                if exit_code is not None:
+                    self.active_processes[name].remove(proc)
                     self.handle_proc_exit(name, task, proc, exit_code)
-            self.active_processes[name] = alive_processes
-            if len(alive_processes) == 0:
-                del self.active_processes[name]
+            if len(self.active_processes[name]) == 0:
+                self.active_processes.pop(name)
 
     def launch(self):
         if self.socket is None:
@@ -442,6 +423,7 @@ class Server:
             sys.exit(1)
         self.socket.listen()
         self.logger.info(f"Server successfully started on {self.host}:{self.port}")
+        self.reload_file()
         input_sockets: list[socket.socket] = [self.socket]
         input_buffers: dict[socket.socket, bytes] = {}
         while True:
