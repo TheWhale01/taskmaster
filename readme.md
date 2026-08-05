@@ -19,4 +19,5 @@ nix run .#client
 ```bash
 uv run server config.yaml
 uv run client
+uv run webhook
 ```
