@@ -313,6 +313,7 @@ class Server:
                     new_tasks.update({key: Task(**value)})
             except Exception as e:
                 self.logger.error(f"Failed to parse {self.filename}: {e}")
+                sys.exit(1)
         self.process_new_config(new_tasks)
 
     def cmd_status(self, args):
@@ -407,14 +408,19 @@ class Server:
                 self.send_webhook_notif(NotificationItem(taskname=taskname, task=task['task'], retries=task['task'].retry_count, status='healthy'))
                 self.wait_success_start.pop(taskname)
         for name, task in self.tasks.items():
-            if name not in self.active_processes:
-                continue
-            for proc in self.active_processes[name]:
+            procs: list[Popen] = []
+            if name in self.active_processes:
+                procs.extend(self.active_processes[name])
+            if name in self.wait_success_start:
+                procs.extend(self.wait_success_start[name]['procs'])
+            for proc in procs:
                 exit_code = proc.poll()
                 if exit_code is not None:
-                    self.active_processes[name].remove(proc)
+                    if proc in self.active_processes.get(name, []):
+                        self.active_processes[name].remove(proc)
+                    self.wait_success_start.pop(name, None)
                     self.handle_proc_exit(name, task, proc, exit_code)
-            if len(self.active_processes[name]) == 0:
+            if name in self.active_processes and len(self.active_processes[name]) == 0:
                 self.active_processes.pop(name)
 
     def launch(self):
