@@ -32,7 +32,7 @@ class Server:
         self.active_processes: dict[str, list[Popen]] = {}
         self.wait_success_start: dict = {}
         self.daemonize(args.daemon)
-        self.logger = logging.Logger("TaskmasterServer")
+        self.logger = logging.getLogger("TaskmasterServer")
         self.setup_logger(logging.DEBUG)
         self.descalate()
         self.check_pid()
@@ -143,8 +143,8 @@ class Server:
         try:
             if self.socket is not None:
                 self.socket.close()
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.error(f"Failed to close socket connection: {e}")
         if os.path.exists(self.pidfile):
             os.unlink(self.pidfile)
         self.logger.info("The server has been successfully shutdown.")
@@ -235,7 +235,7 @@ class Server:
             self.wait_success_start.pop(name, None)
 
     def stop_all_task(self):
-        for name in self.tasks.keys():
+        for name in self.tasks:
             self.despawn_task(name, self.tasks[name])
 
     def get_signal(self, sig_name: str):
@@ -324,7 +324,7 @@ class Server:
             status += f'{taskname:20}\t'
             if taskname in self.active_processes:
                 status += "HEALTHY"
-            elif taskname in self.wait_success_start.keys():
+            elif taskname in self.wait_success_start:
                 status += "STARTED"
             elif taskname not in self.tasks:
                 status += "UNKNOWN TASK"
